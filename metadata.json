@@ -1,0 +1,8 @@
+{
+  "name": "Rustly Forge",
+  "description": "Rustly Forge is an open-source, Rust-powered engineering canvas for sketching, designing, and experimenting with circuits, geometry, and technical ideas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
