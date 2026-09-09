@@ -1,6 +1,6 @@
-<img width="250" height="250" alt="RustlyForgelogo" src="https://github.com/user-attachments/assets/3cec815f-82a7-4269-af47-0a2097fd1106" />
+
 <div align="center">
-  <img src="public/assets/rustly-forge-logo.png" alt="Rustly Forge Logo" width="220" />
+  <img width="250" height="250" alt="RustlyForgelogo" src="https://github.com/user-attachments/assets/3cec815f-82a7-4269-af47-0a2097fd1106" />
 
   # Rustly Forge
 
