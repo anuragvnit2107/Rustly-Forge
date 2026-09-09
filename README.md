@@ -1,1001 +1,281 @@
 <img width="250" height="250" alt="RustlyForgelogo" src="https://github.com/user-attachments/assets/3cec815f-82a7-4269-af47-0a2097fd1106" />
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  Menu,
-  Undo2,
-  Redo2,
-  ZoomIn,
-  ZoomOut,
-  Maximize2,
-  Share2,
-  BookOpen,
-  Sparkles,
-  HelpCircle,
-  Eye,
-  EyeOff,
-  Palette,
-} from 'lucide-react';
-import {
-  ExcalidrawElement,
-  ElementType,
-  ViewportTransform,
-  CanvasPreferences,
-  FillStyle,
-  StrokeStyle,
-  FontFamily,
-  EngineeringComponentType,
-} from './types';
-import { Toolbar } from './components/Toolbar';
-import { PropertiesPanel } from './components/PropertiesPanel';
-import { MainMenu } from './components/MainMenu';
-import { ExportModal } from './components/ExportModal';
-import { FontShowcaseModal } from './components/FontShowcaseModal';
-import { RustCodeViewerModal } from './components/RustCodeViewerModal';
-import { CommandPalette } from './components/CommandPalette';
-import { CollabModal } from './components/CollabModal';
-import { Canvas } from './components/Canvas';
-import { EngineeringSidebar } from './components/EngineeringSidebar';
-import { PresentationController } from './components/PresentationController';
-import { ThemeModal } from './components/ThemeModal';
-import { THEME_PALETTES, applyThemeToRoot } from './themes';
-import { createEngineeringElement } from './engineeringComponents';
-import { getBoundingBox } from './sketchEngine';
-
-const STORAGE_KEY = 'rustly_forge_elements_v1';
-const LEGACY_STORAGE_KEY = 'excalidraw_rust_elements_v1';
-const PREFS_KEY = 'rustly_forge_prefs_v1';
-const LEGACY_PREFS_KEY = 'excalidraw_rust_prefs_v1';
-
-export default function App() {
-  // Elements State
-  const [elements, setElements] = useState<ExcalidrawElement[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // If the saved elements are the circuit preset, clear them so canvas starts empty
-          const isCircuitPreset = parsed.some(
-            (el) => el.text === 'R1 (Resistor)' || el.text === 'L1 (Inductor)' || el.text === 'C1 (Capacitor)'
-          );
-          if (!isCircuitPreset) {
-            return parsed;
-          }
-        }
-      }
-    } catch {
-      // Fallback
-    }
-    return [];
-  });
-
-  // Selection
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [activeTool, setActiveTool] = useState<ElementType>('selection');
-  const [toolLock, setToolLock] = useState<boolean>(false);
-
-  // Undo / Redo History
-  const [history, setHistory] = useState<ExcalidrawElement[][]>([[]]);
-  const [historyIndex, setHistoryIndex] = useState<number>(0);
-
-  // Viewport Transform
-  const [transform, setTransform] = useState<ViewportTransform>({
-    panX: 0,
-    panY: 0,
-    zoom: 1.0,
-  });
-
-  // Canvas Preferences
-  const [preferences, setPreferences] = useState<CanvasPreferences>(() => {
-    try {
-      const saved = localStorage.getItem(PREFS_KEY) || localStorage.getItem(LEGACY_PREFS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      selectMode: 'wrap',
-      toolLock: false,
-      snapToObjects: false,
-      toggleGrid: true,
-      zenMode: false,
-      viewMode: false,
-      arrowBinding: true,
-      snapToMidpoints: false,
-      theme: 'dark',
-      canvasBackground: '#121212',
-      angleSnapping: true,
-      geometricSnapping: true,
-      showDimensions: true,
-    };
-  });
-
-  // Engineering Schematic & Presentation States
-  const [isEngineeringOpen, setIsEngineeringOpen] = useState<boolean>(false);
-  const [isPresentationMode, setIsPresentationMode] = useState<boolean>(false);
-  const [currentSlideIndex, setCurrentSlideIndex] = useState<number>(0);
-
-  // Default drawing properties (matching Screenshot 1)
-  const [defaultStrokeColor, setDefaultStrokeColor] = useState<string>('#e0e0e0');
-  const [defaultBackgroundColor, setDefaultBackgroundColor] = useState<string>('transparent');
-  const [defaultFillStyle, setDefaultFillStyle] = useState<FillStyle>('hachure');
-  const [defaultStrokeWidth, setDefaultStrokeWidth] = useState<number>(2);
-  const [defaultStrokeStyle, setDefaultStrokeStyle] = useState<StrokeStyle>('solid');
-  const [defaultRoughness, setDefaultRoughness] = useState<number>(1.0);
-  const [defaultOpacity, setDefaultOpacity] = useState<number>(1.0);
-  const [defaultFontFamily, setDefaultFontFamily] = useState<FontFamily>('excalifont');
-  const [defaultFontSize, setDefaultFontSize] = useState<number>(22);
-  const [defaultTextAlign, setDefaultTextAlign] = useState<'left' | 'center' | 'right'>('left');
-
-  // Modals
-  const [showMainMenu, setShowMainMenu] = useState<boolean>(false);
-  const [showExportModal, setShowExportModal] = useState<boolean>(false);
-  const [showFontModal, setShowFontModal] = useState<boolean>(false);
-  const [showRustModal, setShowRustModal] = useState<boolean>(false);
-  const [showCommandPalette, setShowCommandPalette] = useState<boolean>(false);
-  const [showCollabModal, setShowCollabModal] = useState<boolean>(false);
-  const [showThemeModal, setShowThemeModal] = useState<boolean>(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const imageInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Sync with LocalStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(elements));
-    } catch {}
-  }, [elements]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify(preferences));
-    } catch {}
-  }, [preferences]);
-
-  // Synchronize dynamic Canvas Theme & Palette variables to root document
-  useEffect(() => {
-    const matching =
-      THEME_PALETTES.find(
-        (t) => t.canvasBackground.toLowerCase() === preferences.canvasBackground.toLowerCase()
-      ) ||
-      THEME_PALETTES.find((t) => t.category === preferences.theme) ||
-      THEME_PALETTES[0];
-    applyThemeToRoot(matching);
-  }, [preferences.canvasBackground, preferences.theme]);
-
-  // Push new state to history
-  const pushHistory = useCallback((newElements: ExcalidrawElement[]) => {
-    setHistory((prev) => {
-      const upToCurrent = prev.slice(0, historyIndex + 1);
-      const next = [...upToCurrent, newElements];
-      if (next.length > 50) next.shift();
-      return next;
-    });
-    setHistoryIndex((prev) => Math.min(prev + 1, 49));
-  }, [historyIndex]);
-
-  // Undo
-  const handleUndo = useCallback(() => {
-    if (historyIndex > 0) {
-      const targetIndex = historyIndex - 1;
-      setHistoryIndex(targetIndex);
-      setElements(history[targetIndex]);
-    }
-  }, [historyIndex, history]);
-
-  // Redo
-  const handleRedo = useCallback(() => {
-    if (historyIndex < history.length - 1) {
-      const targetIndex = historyIndex + 1;
-      setHistoryIndex(targetIndex);
-      setElements(history[targetIndex]);
-    }
-  }, [historyIndex, history]);
-
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Avoid if user is currently typing in input or textarea
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      // Undo / Redo
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
-        return;
-      }
-
-      // Save / Open / Export
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        setShowExportModal(true);
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
-        e.preventDefault();
-        fileInputRef.current?.click();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
-        e.preventDefault();
-        setShowExportModal(true);
-        return;
-      }
-
-      // Command palette: Ctrl + /
-      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
-        e.preventDefault();
-        setShowCommandPalette((prev) => !prev);
-        return;
-      }
-
-      // Toggle grid: Ctrl + '
-      if ((e.ctrlKey || e.metaKey) && e.key === "'") {
-        e.preventDefault();
-        setPreferences((p) => ({ ...p, toggleGrid: !p.toggleGrid }));
-        return;
-      }
-
-      // Zen mode: Alt + Z
-      if (e.altKey && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        setPreferences((p) => ({ ...p, zenMode: !p.zenMode }));
-        return;
-      }
-
-      // Select All: Ctrl + A
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-        e.preventDefault();
-        setSelectedIds(elements.filter((el) => !el.isDeleted).map((el) => el.id));
-        return;
-      }
-
-      // Tool lock: Q
-      if (e.key.toLowerCase() === 'q') {
-        setToolLock((prev) => !prev);
-        return;
-      }
-
-      // F5 to start Presentation Mode
-      if (e.key === 'F5') {
-        e.preventDefault();
-        handleStartPresentation();
-        return;
-      }
-
-      // F to select frame tool
-      if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) {
-        setActiveTool('frame');
-        return;
-      }
-
-      // Numeric tool shortcuts
-      switch (e.key) {
-        case 'h':
-        case 'H':
-          setActiveTool('hand');
-          break;
-        case '1':
-        case 'v':
-        case 'V':
-          setActiveTool('selection');
-          break;
-        case '2':
-        case 'r':
-        case 'R':
-          setActiveTool('rectangle');
-          break;
-        case '3':
-        case 'd':
-        case 'D':
-          setActiveTool('diamond');
-          break;
-        case '4':
-        case 'o':
-        case 'O':
-          setActiveTool('ellipse');
-          break;
-        case '5':
-        case 'a':
-        case 'A':
-          setActiveTool('arrow');
-          break;
-        case '6':
-        case 'l':
-        case 'L':
-          setActiveTool('line');
-          break;
-        case '7':
-        case 'p':
-        case 'P':
-          setActiveTool('freedraw');
-          break;
-        case '8':
-        case 't':
-        case 'T':
-          setActiveTool('text');
-          break;
-        case '9':
-          imageInputRef.current?.click();
-          break;
-        case '0':
-        case 'e':
-        case 'E':
-          setActiveTool('eraser');
-          break;
-        case 'Delete':
-        case 'Backspace':
-          if (selectedIds.length > 0) {
-            e.preventDefault();
-            deleteSelected();
-          }
-          break;
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [elements, selectedIds, handleUndo, handleRedo]);
-
-  // Selected Elements Operations
-  const selectedElements = elements.filter((el) => selectedIds.includes(el.id) && !el.isDeleted);
-
-  const updateSelected = (updates: Partial<ExcalidrawElement>) => {
-    const next = elements.map((el) =>
-      selectedIds.includes(el.id) ? { ...el, ...updates } : el
-    );
-    setElements(next);
-    pushHistory(next);
-  };
-
-  const duplicateSelected = () => {
-    const duplicated: ExcalidrawElement[] = [];
-    const newIds: string[] = [];
-
-    for (const id of selectedIds) {
-      const orig = elements.find((el) => el.id === id);
-      if (orig) {
-        const newId = `elem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        newIds.push(newId);
-        duplicated.push({
-          ...orig,
-          id: newId,
-          x: orig.x + 20,
-          y: orig.y + 20,
-          seed: Math.floor(Math.random() * 100000),
-        });
-      }
-    }
-
-    const next = [...elements, ...duplicated];
-    setElements(next);
-    pushHistory(next);
-    setSelectedIds(newIds);
-  };
-
-  const deleteSelected = () => {
-    const next = elements.map((el) =>
-      selectedIds.includes(el.id) ? { ...el, isDeleted: true } : el
-    );
-    setElements(next);
-    pushHistory(next);
-    setSelectedIds([]);
-  };
-
-  const bringToFront = () => {
-    const nonSelected = elements.filter((el) => !selectedIds.includes(el.id));
-    const selected = elements.filter((el) => selectedIds.includes(el.id));
-    const next = [...nonSelected, ...selected];
-    setElements(next);
-    pushHistory(next);
-  };
-
-  const sendToBack = () => {
-    const nonSelected = elements.filter((el) => !selectedIds.includes(el.id));
-    const selected = elements.filter((el) => selectedIds.includes(el.id));
-    const next = [...selected, ...nonSelected];
-    setElements(next);
-    pushHistory(next);
-  };
-
-  // Image Upload handler
-  const handleImageFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const img = new Image();
-      img.onload = () => {
-        const newId = `img_${Date.now()}`;
-        const newEl: ExcalidrawElement = {
-          id: newId,
-          type: 'image',
-          x: 200,
-          y: 150,
-          width: Math.min(img.width, 400),
-          height: (img.height / img.width) * Math.min(img.width, 400),
-          angle: 0,
-          strokeColor: '#000000',
-          backgroundColor: 'transparent',
-          fillStyle: 'transparent',
-          strokeWidth: 1,
-          strokeStyle: 'solid',
-          roughness: 0,
-          opacity: 1,
-          points: [],
-          imageDataUrl: dataUrl,
-          seed: Math.floor(Math.random() * 10000),
-        };
-        const next = [...elements, newEl];
-        setElements(next);
-        pushHistory(next);
-        setSelectedIds([newId]);
-        setActiveTool('selection');
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
-  };
-
-  // JSON Import handler
-  const handleJsonImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string);
-        if (Array.isArray(parsed)) {
-          setElements(parsed);
-          pushHistory(parsed);
-          setSelectedIds([]);
-        }
-      } catch {
-        alert('Invalid Rustly Forge JSON file.');
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  // Presentation Frames & Slide Handlers
-  const frames = elements
-    .filter((el) => el.type === 'frame' && !el.isDeleted)
-    .sort((a, b) => (a.frameIndex || 0) - (b.frameIndex || 0));
-
-  const handleFitFrame = (frame: ExcalidrawElement) => {
-    const margin = 100;
-    const viewW = window.innerWidth - margin * 2;
-    const viewH = window.innerHeight - margin * 2;
-    const zoomX = viewW / Math.max(100, Math.abs(frame.width));
-    const zoomY = viewH / Math.max(100, Math.abs(frame.height));
-    const targetZoom = Math.min(Math.max(0.2, Math.min(zoomX, zoomY)), 2.0);
-
-    const fx = Math.min(frame.x, frame.x + frame.width);
-    const fy = Math.min(frame.y, frame.y + frame.height);
-    const fw = Math.abs(frame.width);
-    const fh = Math.abs(frame.height);
-
-    const targetPanX = window.innerWidth / 2 - (fx + fw / 2) * targetZoom;
-    const targetPanY = window.innerHeight / 2 - (fy + fh / 2) * targetZoom;
-
-    setTransform({
-      panX: targetPanX,
-      panY: targetPanY,
-      zoom: targetZoom,
-    });
-  };
-
-  const handleStartPresentation = () => {
-    if (frames.length === 0) {
-      let minX = 100, minY = 100, maxX = 800, maxY = 500;
-      const visible = elements.filter((e) => !e.isDeleted);
-      if (visible.length > 0) {
-        minX = Math.min(...visible.map((e) => getBoundingBox(e).minX)) - 40;
-        minY = Math.min(...visible.map((e) => getBoundingBox(e).minY)) - 40;
-        maxX = Math.max(...visible.map((e) => getBoundingBox(e).maxX)) + 40;
-        maxY = Math.max(...visible.map((e) => getBoundingBox(e).maxY)) + 40;
-      }
-      const autoFrame: ExcalidrawElement = {
-        id: `frame_${Date.now()}`,
-        type: 'frame',
-        x: minX,
-        y: minY,
-        width: Math.max(400, maxX - minX),
-        height: Math.max(300, maxY - minY),
-        angle: 0,
-        strokeColor: '#f97316',
-        backgroundColor: 'transparent',
-        fillStyle: 'transparent',
-        strokeWidth: 2,
-        strokeStyle: 'dashed',
-        roughness: 0,
-        opacity: 1,
-        points: [],
-        seed: Math.floor(Math.random() * 100000),
-        frameTitle: 'Slide 1: Overview',
-        frameIndex: 1,
-      };
-      const next = [...elements, autoFrame];
-      setElements(next);
-      pushHistory(next);
-      setCurrentSlideIndex(0);
-      setIsPresentationMode(true);
-      setTimeout(() => handleFitFrame(autoFrame), 50);
-      return;
-    }
-    setCurrentSlideIndex(0);
-    setIsPresentationMode(true);
-    handleFitFrame(frames[0]);
-  };
-
-  const handleAddFrameFromSelection = () => {
-    const selected = elements.filter((e) => selectedIds.includes(e.id) && !e.isDeleted);
-    let fx = 120, fy = 100, fw = 600, fh = 400;
-    if (selected.length > 0) {
-      const minX = Math.min(...selected.map((e) => getBoundingBox(e).minX)) - 30;
-      const minY = Math.min(...selected.map((e) => getBoundingBox(e).minY)) - 30;
-      const maxX = Math.max(...selected.map((e) => getBoundingBox(e).maxX)) + 30;
-      const maxY = Math.max(...selected.map((e) => getBoundingBox(e).maxY)) + 30;
-      fx = minX;
-      fy = minY;
-      fw = maxX - minX;
-      fh = maxY - minY;
-    } else {
-      fx = (window.innerWidth / 2 - transform.panX) / transform.zoom - 300;
-      fy = (window.innerHeight / 2 - transform.panY) / transform.zoom - 200;
-    }
-
-    const nextIdx = frames.length + 1;
-    const newFrame: ExcalidrawElement = {
-      id: `frame_${Date.now()}`,
-      type: 'frame',
-      x: fx,
-      y: fy,
-      width: fw,
-      height: fh,
-      angle: 0,
-      strokeColor: '#f97316',
-      backgroundColor: 'transparent',
-      fillStyle: 'transparent',
-      strokeWidth: 2,
-      strokeStyle: 'dashed',
-      roughness: 0,
-      opacity: 1,
-      points: [],
-      seed: Math.floor(Math.random() * 100000),
-      frameTitle: `Slide ${nextIdx}: Analysis`,
-      frameIndex: nextIdx,
-    };
-
-    const next = [...elements, newFrame];
-    setElements(next);
-    pushHistory(next);
-    setSelectedIds([newFrame.id]);
-    setCurrentSlideIndex(nextIdx - 1);
-  };
-
-  const handleDeleteFrame = (frameId: string) => {
-    const next = elements.map((e) => (e.id === frameId ? { ...e, isDeleted: true } : e));
-    setElements(next);
-    pushHistory(next);
-    if (currentSlideIndex >= frames.length - 1) {
-      setCurrentSlideIndex(Math.max(0, frames.length - 2));
-    }
-  };
-
-  const handleUpdateFrameTitle = (frameId: string, newTitle: string) => {
-    const next = elements.map((e) => (e.id === frameId ? { ...e, frameTitle: newTitle } : e));
-    setElements(next);
-    pushHistory(next);
-  };
-
-  const handleStampComponent = (compType: EngineeringComponentType) => {
-    const cx = (window.innerWidth / 2 - transform.panX) / transform.zoom - 50;
-    const cy = (window.innerHeight / 2 - transform.panY) / transform.zoom - 25;
-    const newComp = createEngineeringElement(compType, cx, cy, {
-      strokeColor: defaultStrokeColor,
-    });
-    const next = [...elements, newComp];
-    setElements(next);
-    pushHistory(next);
-    setSelectedIds([newComp.id]);
-    setActiveTool('selection');
-  };
-
-  // Zoom helpers
-  const handleZoomIn = () => {
-    setTransform((prev) => ({
-      ...prev,
-      zoom: Math.min(5.0, Number((prev.zoom + 0.1).toFixed(2))),
-    }));
-  };
-
-  const handleZoomOut = () => {
-    setTransform((prev) => ({
-      ...prev,
-      zoom: Math.max(0.1, Number((prev.zoom - 0.1).toFixed(2))),
-    }));
-  };
-
-  const handleResetZoom = () => {
-    setTransform((prev) => ({ ...prev, zoom: 1.0, panX: 0, panY: 0 }));
-  };
-
-  return (
-    <div
-      id="rustly-forge-app"
-      className="relative w-screen h-screen overflow-hidden select-none font-sans"
-      style={{ backgroundColor: preferences.canvasBackground }}
-    >
-      {/* Hidden File Inputs */}
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/*"
-        onChange={handleImageFile}
-        className="hidden"
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".json,.rustlyforge,.excalidraw"
-        onChange={handleJsonImport}
-        className="hidden"
-      />
-
-      {/* Top Floating App Bar */}
-      {!preferences.zenMode && (
-        <header className="absolute top-3 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
-          {/* Top Left Menu & Brand & Presets */}
-          <div className="flex items-center gap-2 pointer-events-auto">
-            <button
-              id="btn-main-menu"
-              onClick={() => setShowMainMenu(!showMainMenu)}
-              className="p-2.5 rounded-xl bg-[#232329] hover:bg-[#2e2e38] text-[#d4d4df] hover:text-white border border-[#31303b] shadow-xl transition"
-              title="Main Menu"
-            >
-              <Menu className="w-4 h-4" />
-            </button>
-
-            {/* Application Branding Badge */}
-            <div
-              id="app-branding-badge"
-              className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-[#232329]/90 backdrop-blur-md border border-[#31303b] shadow-xl text-white select-none"
-              title="Rustly Forge - Open-Source Rust-Powered Engineering Canvas"
-            >
-              <img
-                src="/assets/rustly-forge-logo.png"
-                alt="Rustly Forge Logo"
-                className="w-6 h-6 object-contain rounded-md shadow-sm"
-              />
-              <span className="text-xs font-bold tracking-wide">Rustly Forge</span>
-            </div>
-          </div>
-
-          {/* Top Center Floating Toolbar (Screenshot 1) */}
-          <div className="pointer-events-auto">
-            <Toolbar
-              activeTool={activeTool}
-              setActiveTool={setActiveTool}
-              toolLock={toolLock}
-              setToolLock={setToolLock}
-              preferences={preferences}
-              setPreferences={setPreferences}
-              onImageUpload={() => imageInputRef.current?.click()}
-              onOpenRustViewer={() => setShowRustModal(true)}
-              onOpenCollab={() => setShowCollabModal(true)}
-              onOpenFontShowcase={() => setShowFontModal(true)}
-              onToggleEngineering={() => setIsEngineeringOpen((prev) => !prev)}
-              isEngineeringOpen={isEngineeringOpen}
-              onStartPresentation={handleStartPresentation}
-              frameCount={frames.length}
-            />
-          </div>
-
-          {/* Top Right Actions */}
-          <div className="flex items-center gap-2 pointer-events-auto">
-            <button
-              id="btn-themes"
-              onClick={() => setShowThemeModal(true)}
-              className="px-3 py-2 rounded-xl liquid-glass-button text-[#e2e8f0] text-xs font-semibold transition flex items-center gap-1.5"
-              title="Canvas Theme & 16 Color Palettes"
-            >
-              <Palette className="w-3.5 h-3.5 text-[#a5a4f7]" />
-              <span className="hidden lg:inline">Theme</span>
-            </button>
-
-            <button
-              id="btn-collab"
-              onClick={() => setShowCollabModal(true)}
-              className="px-3.5 py-2 rounded-xl bg-[#f97316] hover:bg-[#ea580c] text-white text-xs font-semibold shadow-lg shadow-[#f97316]/25 transition flex items-center gap-2"
-              title="Share and Live Collaborate (E2EE)"
-            >
-              <Share2 className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Share</span>
-            </button>
-          </div>
-        </header>
-      )}
-
-      {/* Left Properties Panel (Screenshot 1) */}
-      {!preferences.zenMode && !preferences.viewMode && (
-        <PropertiesPanel
-          selectedElements={selectedElements}
-          onUpdateSelected={updateSelected}
-          onDuplicateSelected={duplicateSelected}
-          onDeleteSelected={deleteSelected}
-          onBringToFront={bringToFront}
-          onSendToBack={sendToBack}
-          defaultStrokeColor={defaultStrokeColor}
-          setDefaultStrokeColor={setDefaultStrokeColor}
-          defaultBackgroundColor={defaultBackgroundColor}
-          setDefaultBackgroundColor={setDefaultBackgroundColor}
-          defaultFillStyle={defaultFillStyle}
-          setDefaultFillStyle={setDefaultFillStyle}
-          defaultStrokeWidth={defaultStrokeWidth}
-          setDefaultStrokeWidth={setDefaultStrokeWidth}
-          defaultStrokeStyle={defaultStrokeStyle}
-          setDefaultStrokeStyle={setDefaultStrokeStyle}
-          defaultRoughness={defaultRoughness}
-          setDefaultRoughness={setDefaultRoughness}
-          defaultOpacity={defaultOpacity}
-          setDefaultOpacity={setDefaultOpacity}
-          defaultFontFamily={defaultFontFamily}
-          setDefaultFontFamily={setDefaultFontFamily}
-          defaultFontSize={defaultFontSize}
-          setDefaultFontSize={setDefaultFontSize}
-          defaultTextAlign={defaultTextAlign}
-          setDefaultTextAlign={setDefaultTextAlign}
-        />
-      )}
-
-      {/* Main Interactive HTML5 Canvas */}
-      <Canvas
-        elements={elements}
-        setElements={setElements}
-        selectedIds={selectedIds}
-        setSelectedIds={setSelectedIds}
-        activeTool={activeTool}
-        setActiveTool={setActiveTool}
-        toolLock={toolLock}
-        preferences={preferences}
-        transform={transform}
-        setTransform={setTransform}
-        defaultStrokeColor={defaultStrokeColor}
-        defaultBackgroundColor={defaultBackgroundColor}
-        defaultFillStyle={defaultFillStyle}
-        defaultStrokeWidth={defaultStrokeWidth}
-        defaultStrokeStyle={defaultStrokeStyle}
-        defaultRoughness={defaultRoughness}
-        defaultOpacity={defaultOpacity}
-        defaultFontFamily={defaultFontFamily}
-        defaultFontSize={defaultFontSize}
-        defaultTextAlign={defaultTextAlign}
-        canvasRef={canvasRef}
-        pushHistory={pushHistory}
-        onShapeRecognized={(shapeLabel) => {
-          setToastMessage(`Auto-detected: ${shapeLabel}`);
-          setTimeout(() => setToastMessage(null), 2500);
-        }}
-      />
-
-      {/* Bottom Left Controls (Zoom, Undo, Redo) */}
-      {!preferences.zenMode && (
-        <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2">
-          {/* Zoom Widget */}
-          <div className="flex items-center bg-[#232329] border border-[#31303b] rounded-xl p-1 shadow-xl text-xs text-[#d4d4df]">
-            <button
-              onClick={handleZoomOut}
-              className="p-1.5 rounded-lg hover:bg-[#2e2e38] text-[#9c9ba8] hover:text-white transition"
-              title="Zoom Out"
-            >
-              <ZoomOut className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={handleResetZoom}
-              className="px-2 py-1 font-mono text-[11px] hover:bg-[#2e2e38] rounded-md transition"
-              title="Reset Zoom to 100%"
-            >
-              {Math.round(transform.zoom * 100)}%
-            </button>
-            <button
-              onClick={handleZoomIn}
-              className="p-1.5 rounded-lg hover:bg-[#2e2e38] text-[#9c9ba8] hover:text-white transition"
-              title="Zoom In"
-            >
-              <ZoomIn className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Undo / Redo */}
-          <div className="flex items-center bg-[#232329] border border-[#31303b] rounded-xl p-1 shadow-xl text-xs text-[#d4d4df]">
-            <button
-              onClick={handleUndo}
-              disabled={historyIndex <= 0}
-              className={`p-1.5 rounded-lg transition ${
-                historyIndex <= 0
-                  ? 'opacity-40 cursor-not-allowed text-[#6c6b7e]'
-                  : 'hover:bg-[#2e2e38] text-[#9c9ba8] hover:text-white'
-              }`}
-              title="Undo (Ctrl+Z)"
-            >
-              <Undo2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={handleRedo}
-              disabled={historyIndex >= history.length - 1}
-              className={`p-1.5 rounded-lg transition ${
-                historyIndex >= history.length - 1
-                  ? 'opacity-40 cursor-not-allowed text-[#6c6b7e]'
-                  : 'hover:bg-[#2e2e38] text-[#9c9ba8] hover:text-white'
-              }`}
-              title="Redo (Ctrl+Y)"
-            >
-              <Redo2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Bottom Right Zen Mode Exit Button */}
-      {preferences.zenMode && (
-        <button
-          onClick={() => setPreferences((p) => ({ ...p, zenMode: false }))}
-          className="absolute bottom-4 right-4 z-20 px-3 py-1.5 bg-[#232329] border border-[#31303b] rounded-xl text-xs text-white hover:bg-[#2e2e38] shadow-2xl flex items-center gap-2 transition"
-        >
-          <EyeOff className="w-4 h-4" />
-          <span>Exit Zen Mode (Alt+Z)</span>
-        </button>
-      )}
-
-      {/* Main Hamburger Menu (Screenshots 2 & 3) */}
-      <MainMenu
-        isOpen={showMainMenu}
-        onClose={() => setShowMainMenu(false)}
-        onOpen={() => fileInputRef.current?.click()}
-        onSave={() => setShowExportModal(true)}
-        onExport={() => setShowExportModal(true)}
-        onCollab={() => setShowCollabModal(true)}
-        onCommandPalette={() => setShowCommandPalette(true)}
-        onHelp={() => setShowRustModal(true)}
-        onReset={() => {
-          setElements([]);
-          pushHistory([]);
-          setSelectedIds([]);
-        }}
-        onOpenRustViewer={() => setShowRustModal(true)}
-        onOpenThemeModal={() => setShowThemeModal(true)}
-        preferences={preferences}
-        setPreferences={setPreferences}
-      />
-
-      {/* Export Modal */}
-      <ExportModal
-        isOpen={showExportModal}
-        onClose={() => setShowExportModal(false)}
-        canvasRef={canvasRef}
-        elements={elements}
-        canvasBackground={preferences.canvasBackground}
-      />
-
-      {/* 4-Font Typography Showcase (Screenshot 4) */}
-      <FontShowcaseModal
-        isOpen={showFontModal}
-        onClose={() => setShowFontModal(false)}
-        onInsertTextWithFont={(text, font) => {
-          const newId = `elem_${Date.now()}`;
-          const newEl: ExcalidrawElement = {
-            id: newId,
-            type: 'text',
-            x: 250,
-            y: 200,
-            width: 160,
-            height: 60,
-            angle: 0,
-            strokeColor: defaultStrokeColor,
-            backgroundColor: 'transparent',
-            fillStyle: 'transparent',
-            strokeWidth: 1,
-            strokeStyle: 'solid',
-            roughness: 0,
-            opacity: 1,
-            points: [],
-            text: text,
-            fontSize: 26,
-            fontFamily: font,
-            seed: Math.floor(Math.random() * 100000),
-          };
-          const next = [...elements, newEl];
-          setElements(next);
-          pushHistory(next);
-          setSelectedIds([newId]);
-          setActiveTool('selection');
-        }}
-      />
-
-      {/* Rust WASM Architecture & Code Inspector */}
-      <RustCodeViewerModal
-        isOpen={showRustModal}
-        onClose={() => setShowRustModal(false)}
-      />
-
-      {/* Command Palette (Ctrl+/) */}
-      <CommandPalette
-        isOpen={showCommandPalette}
-        onClose={() => setShowCommandPalette(false)}
-        onSelectTool={setActiveTool}
-        onExport={() => setShowExportModal(true)}
-        onReset={() => {
-          setElements([]);
-          pushHistory([]);
-          setSelectedIds([]);
-        }}
-        onOpenRustViewer={() => setShowRustModal(true)}
-        onToggleTheme={() =>
-          setPreferences((p) => ({
-            ...p,
-            theme: p.theme === 'dark' ? 'light' : 'dark',
-            canvasBackground: p.theme === 'dark' ? '#fdfbf7' : '#121212',
-          }))
-        }
-      />
-
-      {/* Live Collaboration Modal (E2EE) */}
-      <CollabModal
-        isOpen={showCollabModal}
-        onClose={() => setShowCollabModal(false)}
-      />
-
-      {/* Engineering Component & Symbol Library Sidebar */}
-      <EngineeringSidebar
-        isOpen={isEngineeringOpen}
-        onClose={() => setIsEngineeringOpen(false)}
-        onSelectComponent={handleStampComponent}
-      />
-
-      {/* Step-by-Step Presentation Mode Controller */}
-      <PresentationController
-        isPresentationMode={isPresentationMode}
-        setIsPresentationMode={setIsPresentationMode}
-        frames={frames}
-        currentSlideIndex={currentSlideIndex}
-        setCurrentSlideIndex={setCurrentSlideIndex}
-        onAddFrameFromSelection={handleAddFrameFromSelection}
-        onDeleteFrame={handleDeleteFrame}
-        onUpdateFrameTitle={handleUpdateFrameTitle}
-        onFitFrame={handleFitFrame}
-      />
-
-      {/* 16 Canvas Theme & Color Palettes Modal (Feature 2.3) */}
-      <ThemeModal
-        isOpen={showThemeModal}
-        onClose={() => setShowThemeModal(false)}
-        preferences={preferences}
-        setPreferences={setPreferences}
-        setDefaultStrokeColor={setDefaultStrokeColor}
-      />
-
-      {/* Floating Toast Notification (Shape Recognition Feedback) */}
-      {toastMessage && (
-        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl liquid-glass-panel text-white text-xs font-semibold shadow-2xl flex items-center gap-2 border border-white/20 animate-in fade-in slide-in-from-bottom-2 duration-200">
-          <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
-          <span>{toastMessage}</span>
-        </div>
-      )}
-    </div>
-  );
-}
+<div align="center">
+  <img src="public/assets/rustly-forge-logo.png" alt="Rustly Forge Logo" width="220" />
+
+  # Rustly Forge
+
+  **A Rust + WebAssembly + React engineering canvas for sketching, designing, and experimenting with circuits, geometry, and technical ideas.**
+
+  [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
+  [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange.svg)](https://www.rust-lang.org/)
+  [![WebAssembly](https://img.shields.io/badge/WebAssembly-WASM-purple.svg)](https://webassembly.org/)
+  [![React](https://img.shields.io/badge/React-19-cyan.svg)](https://react.dev/)
+  [![Vite](https://img.shields.io/badge/Vite-6-yellow.svg)](https://vitejs.dev/)
+
+  <p align="center">
+    <a href="#about-the-project">About</a> •
+    <a href="#architecture">Architecture</a> •
+    <a href="#key-features">Key Features</a> •
+    <a href="#repository-structure">Structure</a> •
+    <a href="#getting-started">Getting Started</a> •
+    <a href="#available-scripts">Scripts</a> •
+    <a href="#contributing">Contributing</a> •
+    <a href="#roadmap">Roadmap</a>
+  </p>
+</div>
+
+---
+
+## About the Project
+
+**Rustly Forge** is a student-built, open-source engineering workspace designed for students, educators, electrical hobbyists, and software engineers who need to quickly sketch schematics, illustrate mechanical ideas, and create technical documentation with an organic hand-drawn aesthetic.
+
+Rather than treating digital drawings as static pixels, Rustly Forge combines the responsive reactivity of **React 19** with a high-performance **Rust / WebAssembly** computational core for scene graph management, mathematical stroke rendering, and spatial geometry.
+
+---
+
+## Architecture
+
+Rustly Forge operates on a hybrid architecture that balances immediate UI reactivity with native computational efficiency:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Rustly Forge UI                       │
+│           (React 19 + Tailwind CSS + Lucide Icons)          │
+├──────────────────────────────┬──────────────────────────────┤
+│       UI & State Layer       │    Interaction & Canvas      │
+│  • Floating Toolbars         │  • HTML5 Canvas 2D Wrapper   │
+│  • Properties Inspector      │  • Multi-Selection Marquee   │
+│  • Circuit Component Drawer  │  • Pan / Zoom Viewport Math  │
+│  • Presentation Controller   │  • Gesture & Input Events    │
+└──────────────┬───────────────┴──────────────┬───────────────┘
+               │                              │
+               ▼                              ▼
+┌──────────────────────────────┐┌─────────────────────────────┐
+│  Client Algorithmic Helpers  ││  Rust / WebAssembly Module  │
+│  • Vector Sketching Engine   ││  (wasm-bindgen + web-sys)   │
+│  • RDP Shape Recognition     ││  • Scene Graph Data Model   │
+│  • Terminal Pin Binding      ││  • Spatial Math & Bounds    │
+│  • Palette & Theme Engine    ││  • Local-First Serde Storage│
+│  • Multi-Format Serializers  ││  • Leptos CSR WASM Runner   │
+└──────────────────────────────┘└─────────────────────────────┘
+```
+
+### 1. React & TypeScript Front-End
+* **Application Shell (`src/App.tsx`)**: Orchestrates global application state, undo/redo history, modal dialogs, and keybindings.
+* **Canvas Controller (`src/components/Canvas.tsx`)**: Manages the viewport transformation matrix (pan, zoom, device-pixel-ratio scaling), multi-element bounding boxes, transform handles, and frame slides.
+* **Algorithmic Generators (`src/sketchEngine.ts`)**: Generates hand-drawn wobbly line geometry, variable-roughness arcs, arrows, and vector hachure/cross-hatch fills.
+* **Circuit Modeling (`src/engineeringComponents.ts`)**: Defines engineering schematic symbols with automated terminal pin attachments and wire snapping.
+* **Shape Recognition (`src/shapeRecognition.ts`)**: Implements Ramer-Douglas-Peucker (RDP) polyline simplification and geometric heuristic tests to snap rough freehand sketches into clean circles, ellipses, triangles, squares, and rectangles.
+
+### 2. Rust & WebAssembly Core
+* **Crate Definition (`Cargo.toml`)**: Configured as both `cdylib` and `rlib` targets utilizing `wasm-bindgen`, `web-sys`, `serde`, and `gloo-storage`.
+* **Scene Graph & Schema (`src/model/element.rs`)**: Type-safe Rust representations of geometric elements, styling enumerations (`StrokeStyle`, `FillStyle`, `FontFamily`), and bounding-box spatial calculations.
+* **Canvas Engine (`src/canvas/engine.rs` & `src/canvas/sketch.rs`)**: Direct Rust bindings to HTML5 `CanvasRenderingContext2d` via `web-sys` for camera transformations, grid drawing, and sketchy rendering routines.
+* **Local Persistence (`src/storage/local.rs`)**: High-speed JSON serialization and deserialization against browser `localStorage` using `gloo-storage` and `serde_json`, with PNG and native SVG generators.
+* **Leptos Entry Point (`src/lib.rs` & `src/app.rs`)**: Standalone Leptos CSR web interface and WASM instantiation hooks with `console_error_panic_hook`.
+
+---
+
+## Key Features
+
+### 📐 Canvas & Drawing Tools
+* **Primitive Tools**: Selection / Pointer, Rectangle, Diamond, Ellipse, Arrow, Line, Freehand Pencil, Text, Image Stamping, and Multi-type Triangles (Equilateral, Right, Isosceles).
+* **Presentation Frames**: Dedicated canvas frames that group technical drawings into numbered presentation slides with step-through controls.
+* **Rough / Sketch Engine**: Configurable sloppiness levels (*Architect*, *Artist*, *Cartoonist*), stroke widths (Thin, Medium, Bold), and stroke styles (Solid, Dashed, Dotted).
+* **Hatching & Shading**: Organic vector interior shading including Solid, Hachure (single-diagonal), and Cross-hatch fills with customizable line spacing and angles.
+* **Smart Shape Recognition**: Freehand sketches automatically classify and snap into clean geometric primitives upon completion.
+
+### ⚡ Circuit & Engineering Components
+* **Passives**: Zigzag Resistors (IEEE standard), Capacitors (anode/cathode leads), and 4-turn Inductors.
+* **Sources & Grounds**: DC Voltage Sources (+/- polarity), AC Voltage Sources (sine wave), and Earth Ground symbols.
+* **Semiconductors & Amplifiers**: Diodes (anode/cathode with triangle-bar symbol) and Operational Amplifiers (inverting/non-inverting terminals).
+* **Logic Gates**: IEEE standard AND, OR, NOT, NAND, and XOR gates.
+* **Integrated Circuits**: Configurable multi-pin IC boxes with customizable labels and pin definitions.
+* **Auto-Binding Terminals**: Terminals detect nearby wires and snap connections automatically for rapid schematic creation.
+
+### 🎨 Typography & Theming
+* **Curated Technical Fonts**:
+  * `Scribble` (Caveat) – Organic engineering handwriting
+  * `Casual` (Comic Neue) – Clean architectural notes
+  * `Heavy` (Lilita One) – Punchy header callouts
+  * `CleanSans` (Nunito) – High-legibility technical specifications
+* **10 Curated Themes**: Instant palette switching across Dark and Light environments (Rustly Forge Dark, Classic Slate, Cyber Glow, Blueprint, Solarized Light, Emerald Minimal, and more).
+
+### 💾 Persistence & Export
+* **Local-First Storage**: Drawings persist automatically to `localStorage` without requiring an account or network connection.
+* **High-Resolution PNG Export**: Raster export with customizable pixel density scaling (1x, 2x, 3x) and optional transparent background.
+* **Vector SVG Export**: Clean, scalable SVG output suitable for inclusion in academic papers, LaTeX, and web documentation.
+* **Scene Graph JSON**: Portable JSON format preserving all raw element properties, z-indices, and component definitions.
+
+### 🛠️ Interactive Developer Modals
+* **Rust Architecture & Source Inspector**: Built-in interactive code viewer allowing users to examine the Rust modules (`lib.rs`, `engine.rs`, `sketch.rs`, `element.rs`, `local.rs`) and learn how the WASM pipeline is constructed.
+* **Command Palette (`Cmd+K` / `Ctrl+K`)**: Rapid keyboard access to canvas actions, tools, exports, and view options.
+* **Zen & View Modes**: Clean uncluttered presentation modes for focused sketching.
+
+---
+
+## Repository Structure
+
+```text
+rustly-forge/
+├── Cargo.toml                 # Rust crate configuration & WASM dependencies
+├── package.json               # Node.js dependencies & development scripts
+├── vite.config.ts             # Vite bundler configuration with Tailwind CSS
+├── tsconfig.json              # TypeScript compilation rules
+├── metadata.json              # Applet metadata & capabilities
+├── index.html                 # Main HTML entry point and Google Fonts loader
+├── public/                    # Static assets served by Vite
+│   ├── logo.png               # Rustly Forge primary logo
+│   └── assets/
+│       └── rustly-forge-logo.png
+└── src/                       # Application source code
+    ├── main.tsx               # React application mounting entry point
+    ├── App.tsx                # Main layout, canvas toolbar & modal orchestration
+    ├── index.css              # Tailwind CSS styles & liquid glass panel classes
+    ├── types.ts               # Shared TypeScript types, enums, and interfaces
+    ├── sketchEngine.ts        # Hand-drawn geometry algorithms & hatching math
+    ├── engineeringComponents.ts# Circuit component catalog & terminal definitions
+    ├── shapeRecognition.ts    # Ramer-Douglas-Peucker shape classifier
+    ├── circuitPreset.ts       # Preloaded demonstration circuit schematic
+    ├── themes.ts              # Theme definitions & color palette manager
+    │
+    ├── components/            # React UI components
+    │   ├── Canvas.tsx         # HTML5 Canvas viewport & interaction controller
+    │   ├── Toolbar.tsx        # Floating primary tool selection bar
+    │   ├── PropertiesPanel.tsx# Stroke, fill, font, and sloppiness inspector
+    │   ├── EngineeringSidebar.tsx # Schematic component library drawer
+    │   ├── ExportModal.tsx    # PNG, SVG, and JSON export dialog
+    │   ├── MainMenu.tsx       # Canvas settings, grid toggle & canvas background
+    │   ├── CommandPalette.tsx # Keyboard-driven command search (Cmd+K)
+    │   ├── RustCodeViewerModal.tsx # Rust & WASM architecture source viewer
+    │   ├── ThemeModal.tsx     # Theme selector & color preview modal
+    │   ├── CollabModal.tsx    # Live collaboration setup dialog
+    │   ├── FontShowcaseModal.tsx   # Typography inspector & font preview
+    │   └── PresentationController.tsx # Slide presentation controls
+    │
+    ├── lib.rs                 # Rust WASM module entry point
+    ├── app.rs                 # Leptos CSR application component in Rust
+    ├── canvas/                # Rust canvas engine
+    │   ├── engine.rs          # 2D context manager, viewport math & animation
+    │   └── sketch.rs          # Procedural sketching & jittering in Rust
+    ├── model/                 # Rust data models
+    │   └── element.rs         # Element structs, enums & Serde schemas
+    └── storage/               # Rust storage and persistence
+        └── local.rs           # gloo-storage local persistence & SVG exporter
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+* **Node.js**: Version `18.0` or higher
+* **npm**: Version `9.0` or higher (or `bun` / `pnpm`)
+* *(Optional for compiling Rust WASM)*:
+  * **Rust Toolchain**: `rustc` and `cargo` (edition 2021)
+  * **wasm-pack**: `cargo install wasm-pack`
+
+### Local Development Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-username/rustly-forge.git
+   cd rustly-forge
+   ```
+
+2. **Install frontend dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Start the development server:**
+   ```bash
+   npm run dev
+   ```
+   Open your browser and navigate to `http://localhost:3000`.
+
+4. **Verify TypeScript compilation:**
+   ```bash
+   npm run lint
+   ```
+
+5. **Build for production:**
+   ```bash
+   npm run build
+   ```
+   The compiled assets will be output to the `dist/` directory.
+
+---
+
+## Available Scripts
+
+| Script | Command | Description |
+| :--- | :--- | :--- |
+| `npm run dev` | `vite --port=3000 --host=0.0.0.0` | Starts the local Vite development server on port 3000 |
+| `npm run build` | `vite build` | Compiles TypeScript and packages the production application |
+| `npm run preview` | `vite preview` | Runs a local web server to preview the production build |
+| `npm run lint` | `tsc --noEmit` | Runs the TypeScript compiler to validate types across the codebase |
+| `npm run clean` | `rm -rf dist server.js` | Removes generated build artifacts and temporary files |
+
+---
+
+## Contributing
+
+Rustly Forge is built by students and is open to anyone who wants to learn Rust, WebAssembly, computer graphics, or modern React. Contributions of all sizes are warmly welcomed!
+
+### Good First Issues
+* **Circuit Components**: Add new schematic symbols (e.g., Transformers, BJTs, MOSFETs, Zener Diodes) in `src/engineeringComponents.ts`.
+* **Shape Recognition**: Refine corner-detection and circularity thresholds in `src/shapeRecognition.ts`.
+* **Canvas Math**: Implement bezier-curve routing for circuit wires connecting terminal pins.
+* **Themes**: Design new light or dark theme presets in `src/themes.ts`.
+* **WASM Optimizations**: Benchmark and extend direct WebAssembly geometry calculations in `src/canvas/sketch.rs`.
+
+### Workflow
+1. Fork the repository and create a descriptive branch:
+   ```bash
+   git checkout -b feature/add-transformer-component
+   ```
+2. Make your modifications following existing coding patterns.
+3. Verify that the TypeScript linter passes cleanly:
+   ```bash
+   npm run lint
+   ```
+4. Commit your changes with clear, concise commit messages:
+   ```bash
+   git commit -m "feat: add transformer circuit component with center-tap terminals"
+   ```
+5. Push to your fork and submit a Pull Request.
+
+---
+
+## Roadmap & Current Status
+
+* **Status**: Active Open-Source Development (Alpha).
+* **Current Focus**:
+  * [x] Hybrid React + Rust/WASM codebase structure
+  * [x] 14 fundamental circuit components with terminal pin snapping
+  * [x] Rough hand-drawn vector rendering with hachure fills
+  * [x] Local-first autosave, PNG, SVG, and JSON export
+  * [x] Frame presentation mode & 10 custom themes
+  * [ ] Direct shared-memory buffer rendering from WASM to HTML5 Canvas
+  * [ ] Orthogonal auto-routing for circuit wire connections
+  * [ ] Interactive circuit DC operating-point analysis
+  * [ ] Real-time peer-to-peer WebRTC canvas synchronization
+
+---
+
+## Acknowledgments
+
+* **The Rust & WebAssembly Community** for creating [`wasm-bindgen`](https://github.com/rustwasm/wasm-bindgen), [`web-sys`](https://crates.io/crates/web-sys), and [`gloo`](https://github.com/rustwasm/gloo).
+* **React & Vite Teams** for fast modern frontend iteration.
+* **Rough.js** and the procedural computer graphics community for foundational research into algorithmic hand-drawn rendering and polygon hatching.
+* **Lucide Icons** for the consistent icon set.
+
+---
+
+## License
+
+License: Not yet specified.
+
